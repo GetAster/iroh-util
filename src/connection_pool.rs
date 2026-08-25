@@ -1207,4 +1207,213 @@ mod tests {
         endpoint.close().await;
         Ok(())
     }
+
+    /// Regression from the portal-sync freeze-apply-window diagnosis: a
+    /// request burst that saturates every bounded queue while the connect is
+    /// held open, then fails, must leave every caller resolved.
+    ///
+    /// On the 0.6.0 pool this interleave deadlocked permanently (the pool
+    /// actor parked forwarding into a full per-connection channel whose
+    /// consumer it was itself responsible for polling; connection actors
+    /// blocking-sent close/idle into the full pool inbox). The interleave is
+    /// capacity-driven, not timing-driven: a gated `on_connected` holds the
+    /// connect while 300 concurrent requests queue, and the gate then
+    /// releases with an error.
+    #[tokio::test]
+    async fn burst_with_failing_connect_does_not_deadlock() -> TestResult<()> {
+        let (ids, routers, address_lookup) = echo_servers(1).await?;
+        let id = ids[0];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let on_connected: OnConnected = Arc::new(move |_, _| {
+            let mut gate = gate_rx.clone();
+            Box::pin(async move {
+                while !*gate.borrow() {
+                    if gate.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Err(io::Error::other("gated connect refused"))
+            })
+        });
+        let pool = ConnectionPool::new(
+            endpoint.clone(),
+            ECHO_ALPN,
+            Options {
+                // Generous timeouts so nothing here depends on a timer: the
+                // outcome is decided by queue capacity and the gate.
+                idle_timeout: Duration::from_secs(120),
+                connect_timeout: Duration::from_secs(120),
+                max_connections: 32,
+                on_connected: Some(on_connected),
+            },
+        );
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..300 {
+            let pool = pool.clone();
+            requests.spawn(async move { pool.get_or_connect(id).await });
+        }
+        n0_future::time::sleep(Duration::from_secs(2)).await;
+        gate_tx.send(true).ok();
+        let drain = async {
+            let mut resolved = 0usize;
+            while let Some(res) = requests.join_next().await {
+                let _ = res.expect("get_or_connect task panicked");
+                resolved += 1;
+            }
+            resolved
+        };
+        let resolved = n0_future::time::timeout(Duration::from_secs(30), drain)
+            .await
+            .expect("connection pool deadlocked: get_or_connect callers never resolved");
+        assert_eq!(resolved, 300);
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// Dropping every pool handle must terminate the actor and close what it
+    /// owns: a handed-out connection observes `closed()`, even while an
+    /// abandoned connect attempt is still held open inside the actor.
+    ///
+    /// A *live* `get_or_connect` waiter necessarily keeps the pool alive (the
+    /// future borrows a handle), so "waiters get `Shutdown` on drop" is not
+    /// reachable through the public API — the drain path that answers waiters
+    /// covers callers that abandoned their future. This witness abandons one
+    /// (abort) and requires the drop to still terminate cleanly.
+    #[tokio::test]
+    async fn pool_drop_terminates_actor_and_closes_connections() -> TestResult<()> {
+        let (ids, routers, address_lookup) = echo_servers(2).await?;
+        let held_peer = ids[0];
+        let pending_peer = ids[1];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        // Gate only the second peer's connect so one connection is handed out
+        // while another is still connecting when the pool is dropped.
+        let gated = pending_peer;
+        let on_connected: OnConnected = Arc::new(move |_, conn| {
+            let hold = conn.remote_id() == gated;
+            Box::pin(async move {
+                if hold {
+                    n0_future::time::sleep(Duration::from_secs(600)).await;
+                }
+                Ok(())
+            })
+        });
+        let pool = ConnectionPool::new(
+            endpoint.clone(),
+            ECHO_ALPN,
+            Options {
+                idle_timeout: Duration::from_secs(120),
+                connect_timeout: Duration::from_secs(120),
+                max_connections: 32,
+                on_connected: Some(on_connected),
+            },
+        );
+        let held = pool.get_or_connect(held_peer).await?;
+        let pending = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.get_or_connect(pending_peer).await })
+        };
+        n0_future::time::sleep(Duration::from_millis(300)).await;
+        // The caller abandons its request (dropping its pool clone with it),
+        // then the last handle goes away.
+        pending.abort();
+        drop(pool);
+        // The held connection must be actively closed by the exiting actor,
+        // even though the gated connect attempt never resolved.
+        n0_future::time::timeout(Duration::from_secs(10), held.closed())
+            .await
+            .expect("handed-out connection not closed after pool drop");
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// Several peers with slow (held-open) connects, each with a request
+    /// backlog, must not delay an unrelated live peer — and releasing the
+    /// holds must resolve every queued caller.
+    #[tokio::test]
+    async fn slow_peer_backlogs_do_not_starve_unrelated_peer() -> TestResult<()> {
+        use std::time::Instant;
+
+        let (ids, routers, address_lookup) = echo_servers(4).await?;
+        let live_peer = ids[0];
+        let slow_peers = [ids[1], ids[2], ids[3]];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let slow_set = slow_peers.to_vec();
+        let on_connected: OnConnected = Arc::new(move |_, conn| {
+            let hold = slow_set.contains(&conn.remote_id());
+            let mut gate = gate_rx.clone();
+            Box::pin(async move {
+                if hold {
+                    while !*gate.borrow() {
+                        if gate.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(())
+            })
+        });
+        let pool = ConnectionPool::new(
+            endpoint.clone(),
+            ECHO_ALPN,
+            Options {
+                idle_timeout: Duration::from_secs(120),
+                connect_timeout: Duration::from_secs(120),
+                max_connections: 32,
+                on_connected: Some(on_connected),
+            },
+        );
+        let mut backlog = tokio::task::JoinSet::new();
+        for peer in slow_peers {
+            for _ in 0..150 {
+                let pool = pool.clone();
+                backlog.spawn(async move { pool.get_or_connect(peer).await });
+            }
+        }
+        n0_future::time::sleep(Duration::from_millis(500)).await;
+        // The unrelated peer must connect promptly while 450 requests are
+        // queued behind three held connects.
+        let probe = Instant::now();
+        let conn = n0_future::time::timeout(Duration::from_secs(5), pool.get_or_connect(live_peer))
+            .await
+            .expect("live-peer probe starved behind slow-peer backlogs")?;
+        let msg = b"prompt";
+        assert_eq!(echo_client(&conn, msg).await?, msg);
+        drop(conn);
+        let waited = probe.elapsed();
+        assert!(waited < Duration::from_secs(5), "probe took {waited:?}");
+        // Releasing the holds must resolve the entire backlog.
+        gate_tx.send(true).ok();
+        let drain = async {
+            let mut ok = 0usize;
+            while let Some(res) = backlog.join_next().await {
+                if res.expect("backlog task panicked").is_ok() {
+                    ok += 1;
+                }
+            }
+            ok
+        };
+        let ok = n0_future::time::timeout(Duration::from_secs(30), drain)
+            .await
+            .expect("slow-peer backlog never resolved after release");
+        assert_eq!(ok, 450, "not every queued caller got a connection");
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
 }
