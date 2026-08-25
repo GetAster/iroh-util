@@ -23,11 +23,7 @@ use iroh::{
     endpoint::{ConnectError, Connection},
 };
 use n0_error::{e, stack_error};
-use n0_future::{
-    FuturesUnordered, MaybeFuture, Stream, StreamExt,
-    future::{self},
-    time::Duration,
-};
+use n0_future::{MaybeFuture, Stream, StreamExt, time::Duration};
 use tokio::sync::{
     Notify,
     mpsc::{self, error::SendError as TokioSendError},
@@ -208,11 +204,48 @@ impl Context {
                 MaybeFuture::Some(async move { conn.closed().await })
             }
             Err(e) => {
-                debug!(%node_id, "Failed to connect {e:?}, requesting shutdown");
-                if context.owner.close(node_id).await.is_err() {
-                    return;
+                debug!(%node_id, "Failed to connect {e:?}, draining queue and exiting");
+                // Reply the connect error to every queued request and exit —
+                // without ever awaiting the pool inbox. The pool actor may be
+                // parked right now forwarding into *this* channel (it fills
+                // under a burst), and a blocking close notification from here
+                // is the other half of a two-actor deadlock: each side waits
+                // on the other's full channel, forever, and every later
+                // `get_or_connect` — for any peer — hangs with it.
+                //
+                // Draining frees capacity, which unparks the pool actor; the
+                // close notification is best-effort bookkeeping. Exit drops
+                // `rx`, and a failed forward into a dropped channel is
+                // already handled by the pool actor as "actor died": it
+                // replaces the actor and retries, so nothing is stranded.
+                //
+                // Ask for removal *first*, so a request for this peer issued
+                // after the failure gets a fresh dial rather than this stale
+                // error; the sleep arm below retries while the inbox is full.
+                let mut closed = matches!(
+                    context.owner.try_close(node_id),
+                    Ok(()) | Err(TryNotifyError::Shutdown)
+                );
+                loop {
+                    tokio::select! {
+                        biased;
+                        req = rx.recv() => match req {
+                            Some(RequestRef { tx, .. }) => {
+                                tx.send(Err(e.clone())).ok();
+                            }
+                            // The pool acknowledged the close and dropped our
+                            // sender: every request has been answered.
+                            None => break,
+                        },
+                        _ = n0_future::time::sleep(Duration::from_millis(100)), if !closed => {
+                            closed = matches!(
+                                context.owner.try_close(node_id),
+                                Ok(()) | Err(TryNotifyError::Shutdown)
+                            );
+                        }
+                    }
                 }
-                MaybeFuture::None
+                return;
             }
         };
 
@@ -253,19 +286,30 @@ impl Context {
                 }
 
                 _ = &mut conn_close => {
-                    // connection was closed by somebody, notify owner that we should be removed
-                    context.owner.close(node_id).await.ok();
+                    // The connection is gone: exit rather than keep handing
+                    // out a dead connection. The notification is best-effort
+                    // and never a blocking send — the pool actor may be
+                    // parked forwarding into this very channel, and awaiting
+                    // its full inbox from here deadlocks both actors. Exit
+                    // drops `rx`; queued callers resolve with an error, and
+                    // the pool actor replaces a dead actor on its next
+                    // forward.
+                    let _ = context.owner.try_close(node_id);
+                    break;
                 }
 
                 _ = idle_stream.next() => {
                     if !counter.is_idle() {
                         continue;
                     };
-                    // notify the pool that we are idle.
+                    // Tell the pool we are idle — LRU bookkeeping only, so a
+                    // full inbox just drops the notification (blocking here is
+                    // one half of the two-actor deadlock). The idle timer is
+                    // armed either way; only pool shutdown ends the actor.
                     trace!(%node_id, "Idle");
-                    if context.owner.idle(node_id).await.is_err() {
-                        // If we can't notify the pool, we are shutting down
-                        break;
+                    match context.owner.try_idle(node_id) {
+                        Ok(()) | Err(TryNotifyError::Full) => {}
+                        Err(TryNotifyError::Shutdown) => break,
                     }
                     // set the idle timer
                     idle_timer.as_mut().set_future(n0_future::time::sleep(context.options.idle_timeout));
@@ -274,8 +318,15 @@ impl Context {
                 // Idle timeout - request shutdown
                 _ = &mut idle_timer => {
                     trace!(%node_id, "Idle timer expired, requesting shutdown");
-                    context.owner.close(node_id).await.ok();
-                    // Don't break here - wait for main actor to close our channel
+                    match context.owner.try_close(node_id) {
+                        // Wait for the pool actor to close our channel.
+                        Ok(()) => {}
+                        // Inbox full right now; retry shortly, never block.
+                        Err(TryNotifyError::Full) => {
+                            idle_timer.as_mut().set_future(n0_future::time::sleep(Duration::from_millis(100)));
+                        }
+                        Err(TryNotifyError::Shutdown) => break,
+                    }
                 }
             }
         }
@@ -296,8 +347,6 @@ struct Actor {
     // idle set (most recent last)
     // todo: use a better data structure if this becomes a performance issue
     idle: VecDeque<EndpointId>,
-    // per connection tasks
-    tasks: FuturesUnordered<future::Boxed<()>>,
 }
 
 impl Actor {
@@ -318,7 +367,6 @@ impl Actor {
                     endpoint,
                     owner: ConnectionPool { tx: tx.clone() },
                 }),
-                tasks: FuturesUnordered::new(),
             },
             tx,
         )
@@ -376,8 +424,14 @@ impl Actor {
 
                 let context = self.context.clone();
 
-                self.tasks
-                    .push(Box::pin(context.run_connection_actor(id, conn_rx)));
+                // A real task, not a future polled by this actor's own select:
+                // `handle_msg` awaits capacity on per-connection channels, and
+                // an actor that is only polled by the loop currently parked on
+                // its channel can never drain it — the pool wedges on the
+                // first >100-request burst, permanently. Spawned actors always
+                // run; they exit when their request channel closes (pool drop
+                // included: dropping `connections` drops every sender).
+                n0_future::task::spawn(context.run_connection_actor(id, conn_rx));
 
                 // Send the handler to the new actor
                 if conn_tx.send(msg).await.is_err() {
@@ -398,20 +452,8 @@ impl Actor {
     }
 
     pub async fn run(mut self) {
-        loop {
-            tokio::select! {
-                biased;
-
-                msg = self.rx.recv() => {
-                    if let Some(msg) = msg {
-                        self.handle_msg(msg).await;
-                    } else {
-                        break;
-                    }
-                }
-
-                _ = self.tasks.next(), if !self.tasks.is_empty() => {}
-            }
+        while let Some(msg) = self.rx.recv().await {
+            self.handle_msg(msg).await;
         }
     }
 }
@@ -463,16 +505,44 @@ impl ConnectionPool {
     /// Notify the connection pool that a connection is idle.
     ///
     /// Should only be called from connection handlers.
-    pub(crate) async fn idle(
-        &self,
-        id: EndpointId,
-    ) -> std::result::Result<(), ConnectionPoolError> {
-        self.tx
-            .send(ActorMessage::ConnectionIdle { id })
-            .await
-            .map_err(|_| e!(ConnectionPoolError::Shutdown))?;
-        Ok(())
+    ///
+    /// Non-blocking on purpose: the pool actor may itself be parked forwarding
+    /// a request into *this* connection's full channel, so a connection actor
+    /// that awaits inbox capacity here deadlocks the pool (both actors waiting
+    /// on each other's full channel, forever). Idle notifications are LRU
+    /// bookkeeping; under a full inbox the notification is dropped and the
+    /// caller retries on its own schedule.
+    pub(crate) fn try_idle(&self, id: EndpointId) -> std::result::Result<(), TryNotifyError> {
+        match self.tx.try_send(ActorMessage::ConnectionIdle { id }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryNotifyError::Full),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryNotifyError::Shutdown),
+        }
     }
+
+    /// Ask the pool to remove a connection, without blocking.
+    ///
+    /// Same reasoning as [`Self::try_idle`]: a blocking send from a connection
+    /// actor into the pool inbox is one half of a deadlock cycle. Dropping the
+    /// notification is safe — a connection actor that exits closes its request
+    /// channel, and the pool actor already treats a failed forward as "actor
+    /// died" and replaces it.
+    pub(crate) fn try_close(&self, id: EndpointId) -> std::result::Result<(), TryNotifyError> {
+        match self.tx.try_send(ActorMessage::ConnectionShutdown { id }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryNotifyError::Full),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryNotifyError::Shutdown),
+        }
+    }
+}
+
+/// Why a non-blocking owner notification was not delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TryNotifyError {
+    /// The pool inbox is full right now; the notification was dropped.
+    Full,
+    /// The pool has shut down.
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -859,6 +929,92 @@ mod tests {
         let conn = pool.get_or_connect(ids[0]).await?;
         let cid2 = conn.stable_id();
         assert_ne!(cid1, cid2);
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// Regression: a request burst that fills both bounded channels deadlocks
+    /// the pool permanently.
+    ///
+    /// The pool actor forwards every `RequestRef` into the per-connection
+    /// channel (capacity 100) with a *blocking* send, and each connection
+    /// actor reports connect-failure/close/idle back into the pool inbox
+    /// (capacity 100), also with a blocking send. Fill both queues with one
+    /// burst and let the connect fail, and the two actors park on each
+    /// other's full channel forever: the pool actor waits for the connection
+    /// actor to drain a channel it will never read again, while the
+    /// connection actor waits for the pool actor to drain an inbox it is no
+    /// longer reading. From then on `get_or_connect` hangs for *every* peer,
+    /// with no timeout — `connect_timeout` covers only the dial, not pool
+    /// admission.
+    ///
+    /// The interleave is capacity-driven, not timing-driven: a gated
+    /// `on_connected` holds the connection actor before its receive loop
+    /// while 300 concurrent requests saturate the per-connection channel
+    /// (100), the parked forward (1), and the pool inbox (100+); releasing
+    /// the gate with an error then drives the connection actor into its
+    /// blocking failure report against the full inbox.
+    #[tokio::test]
+    // #[traced_test]
+    async fn burst_with_failing_connect_does_not_deadlock() -> TestResult<()> {
+        let n = 1;
+        let (ids, routers, address_lookup) = echo_servers(n).await?;
+        let id = ids[0];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let on_connected: OnConnected = Arc::new(move |_, _| {
+            let mut gate = gate_rx.clone();
+            Box::pin(async move {
+                while !*gate.borrow() {
+                    if gate.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Err(io::Error::other("gated connect refused"))
+            })
+        });
+        let pool = ConnectionPool::new(
+            endpoint.clone(),
+            ECHO_ALPN,
+            Options {
+                // Generous timeouts so nothing here depends on a timer: the
+                // deadlock (and its absence) is decided by channel capacity.
+                idle_timeout: Duration::from_secs(120),
+                connect_timeout: Duration::from_secs(120),
+                max_connections: 32,
+                on_connected: Some(on_connected),
+            },
+        );
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..300 {
+            let pool = pool.clone();
+            requests.spawn(async move { pool.get_or_connect(id).await });
+        }
+        // Let the burst park: sends queue in capacity order, so once the dust
+        // settles the per-connection channel and the pool inbox are both full
+        // regardless of scheduling. Nothing below depends on how long this
+        // takes — releasing the gate later only makes the test slower.
+        n0_future::time::sleep(Duration::from_secs(2)).await;
+        gate_tx.send(true).ok();
+        // Every caller must resolve, one way or the other. Before the fix the
+        // two actors deadlock and this times out with all 300 pending.
+        let drain = async {
+            let mut resolved = 0usize;
+            while let Some(res) = requests.join_next().await {
+                let _ = res.expect("get_or_connect task panicked");
+                resolved += 1;
+            }
+            resolved
+        };
+        let resolved = n0_future::time::timeout(Duration::from_secs(30), drain)
+            .await
+            .expect("connection pool deadlocked: get_or_connect callers never resolved");
+        assert_eq!(resolved, 300);
         shutdown_routers(routers).await;
         endpoint.close().await;
         Ok(())
