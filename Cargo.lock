@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-util"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "derive_more",
  "iroh",
