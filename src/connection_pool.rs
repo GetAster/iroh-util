@@ -160,6 +160,7 @@ pub enum ConnectionPoolError {
 enum ActorMessage {
     RequestRef(RequestRef),
     ConnectionShutdown { id: EndpointId },
+    Retire { id: EndpointId, generation: u64 },
 }
 
 struct RequestRef {
@@ -177,6 +178,8 @@ enum PeerState {
     },
     /// We have a connection to the peer.
     Ready {
+        /// The generation of the attempt that made this connection.
+        generation: u64,
         connection: Connection,
         counter: ConnectionCounter,
         unused_since: Option<Instant>,
@@ -189,12 +192,12 @@ struct Actor {
     /// Inbox
     rx: mpsc::Receiver<ActorMessage>,
     /// Separate inbox for unused events, gets processed before the main inbox.
-    unused_rx: mpsc::UnboundedReceiver<EndpointId>,
+    unused_rx: mpsc::UnboundedReceiver<(EndpointId, u64)>,
     /// Sender for the unused inbox to be cloned into the connection counter.
     ///
     /// This is unbounded so it can be used in Drop, but it is bounded by the number
     /// of ConnectionRefs we give out, which is bounded by max_connections.
-    unused_tx: mpsc::UnboundedSender<EndpointId>,
+    unused_tx: mpsc::UnboundedSender<(EndpointId, u64)>,
     options: Options,
     endpoint: Endpoint,
     alpn: Arc<[u8]>,
@@ -203,8 +206,9 @@ struct Actor {
     connecting: FuturesUnordered<Boxed<ConnectResult>>,
     /// Generation counter used to distinguish between connection attempts to the same peer.
     next_generation: u64,
-    /// Futures for connection close watchers.
-    conn_close: FuturesUnordered<Boxed<EndpointId>>,
+    /// Futures for connection close watchers, yielding the peer and the
+    /// generation of the connection that closed.
+    conn_close: FuturesUnordered<Boxed<(EndpointId, u64)>>,
     /// Futures for cleaning up unused connections after the unused timeout.
     unused_timers: FuturesUnordered<Boxed<EndpointId>>,
     /// Currently unused connections, in order of when they became unused.
@@ -246,17 +250,17 @@ impl Actor {
                 biased;
 
                 // Handle unused events first, since this might give us some room.
-                Some(id) = self.unused_rx.recv() => {
-                    self.handle_unused_event(id);
+                Some((id, generation)) = self.unused_rx.recv() => {
+                    self.handle_unused_event(id, generation);
                 }
 
                 Some((id, generation, result)) = self.connecting.next(), if !self.connecting.is_empty() => {
                     self.handle_connect_result(id, generation, result);
                 }
 
-                Some(id) = self.conn_close.next(), if !self.conn_close.is_empty() => {
-                    trace!(%id, "connection closed by peer");
-                    self.remove_peer(id);
+                Some((id, generation)) = self.conn_close.next(), if !self.conn_close.is_empty() => {
+                    trace!(%id, generation, "connection closed");
+                    self.remove_ready(id, generation, None);
                 }
 
                 Some(id) = self.unused_timers.next(), if !self.unused_timers.is_empty() => {
@@ -301,6 +305,11 @@ impl Actor {
                 trace!(%id, "shutdown requested");
                 self.remove_peer(id);
             }
+            ActorMessage::Retire { id, generation } => {
+                if self.remove_ready(id, generation, Some(b"retired")) {
+                    debug!(%id, generation, "retired connection");
+                }
+            }
         }
     }
 
@@ -319,6 +328,7 @@ impl Actor {
                     connection,
                     counter,
                     unused_since,
+                    ..
                 } => {
                     *unused_since = None;
                     let one = counter.get_one();
@@ -400,7 +410,7 @@ impl Actor {
         };
         match result {
             Ok(conn) => {
-                let counter = ConnectionCounter::new(id, self.unused_tx.clone());
+                let counter = ConnectionCounter::new(id, generation, self.unused_tx.clone());
                 for tx in waiters {
                     if tx.is_closed() {
                         continue;
@@ -413,11 +423,11 @@ impl Actor {
                 info!(%id, "connected, {} ref(s) outstanding", counter.current());
 
                 // Create a future that waits for the connection to close.
-                let close_fut: Boxed<EndpointId> = {
+                let close_fut: Boxed<(EndpointId, u64)> = {
                     let conn = conn.clone();
                     Box::pin(async move {
                         conn.closed().await;
-                        id
+                        (id, generation)
                     })
                 };
                 self.conn_close.push(close_fut);
@@ -433,6 +443,7 @@ impl Actor {
                 self.peers.insert(
                     id,
                     PeerState::Ready {
+                        generation,
                         connection: conn,
                         counter,
                         unused_since,
@@ -448,8 +459,9 @@ impl Actor {
         }
     }
 
-    fn handle_unused_event(&mut self, id: EndpointId) {
+    fn handle_unused_event(&mut self, id: EndpointId, generation: u64) {
         let Some(PeerState::Ready {
+            generation: current,
             counter,
             unused_since,
             ..
@@ -457,6 +469,10 @@ impl Actor {
         else {
             return;
         };
+        // The event is for a connection the pool no longer holds.
+        if *current != generation {
+            return;
+        }
         // Connection was handed out in the meantime.
         if !counter.is_unused() {
             return;
@@ -500,6 +516,31 @@ impl Actor {
 
     fn remove_peer(&mut self, id: EndpointId) {
         self.remove_peer_inner(id);
+    }
+
+    /// Removes the peer's connection if it is still the one from `generation`,
+    /// closing it with `reason` if given. Returns whether it was removed.
+    ///
+    /// Events for a connection the pool has already replaced must not touch
+    /// its successor, hence the generation check.
+    fn remove_ready(&mut self, id: EndpointId, generation: u64, reason: Option<&[u8]>) -> bool {
+        let current = matches!(
+            self.peers.get(&id),
+            Some(PeerState::Ready { generation: g, .. }) if *g == generation
+        );
+        if !current {
+            return false;
+        }
+        match reason {
+            Some(reason) => {
+                self.unused.retain(|x| *x != id);
+                if let Some(PeerState::Ready { connection, .. }) = self.peers.remove(&id) {
+                    connection.close(0u32.into(), reason);
+                }
+            }
+            None => self.remove_peer_inner(id),
+        }
+        true
     }
 
     fn remove_peer_inner(&mut self, id: EndpointId) {
@@ -568,13 +609,41 @@ impl ConnectionPool {
             .map_err(|_| e!(ConnectionPoolError::Shutdown))?;
         Ok(())
     }
+
+    /// Retire a connection that the caller found broken.
+    ///
+    /// If the pool still hands out `conn` for its peer, the pool closes it with
+    /// the reason `retired` and forgets it, so the next
+    /// [`get_or_connect`](Self::get_or_connect) for that peer dials anew. Every
+    /// other holder of the connection sees it closed.
+    ///
+    /// Use this when the connection no longer reaches the peer, for example
+    /// because the peer stopped acknowledging packets after a restart on a new
+    /// address. Without it, the pool keeps handing out such a connection until
+    /// QUIC's idle timeout closes it.
+    ///
+    /// Does nothing if the pool has already replaced or dropped `conn`, so a
+    /// fresh connection to the same peer is never closed by a late call.
+    pub async fn retire(
+        &self,
+        conn: &ConnectionRef,
+    ) -> std::result::Result<(), ConnectionPoolError> {
+        let id = conn._permit.inner.id;
+        let generation = conn._permit.inner.generation;
+        self.tx
+            .send(ActorMessage::Retire { id, generation })
+            .await
+            .map_err(|_| e!(ConnectionPoolError::Shutdown))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 struct ConnectionCounterInner {
     count: AtomicUsize,
     id: EndpointId,
-    unused_tx: mpsc::UnboundedSender<EndpointId>,
+    generation: u64,
+    unused_tx: mpsc::UnboundedSender<(EndpointId, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -583,11 +652,16 @@ struct ConnectionCounter {
 }
 
 impl ConnectionCounter {
-    fn new(id: EndpointId, unused_tx: mpsc::UnboundedSender<EndpointId>) -> Self {
+    fn new(
+        id: EndpointId,
+        generation: u64,
+        unused_tx: mpsc::UnboundedSender<(EndpointId, u64)>,
+    ) -> Self {
         Self {
             inner: Arc::new(ConnectionCounterInner {
                 count: AtomicUsize::new(0),
                 id,
+                generation,
                 unused_tx,
             }),
         }
@@ -619,7 +693,10 @@ impl Drop for OneConnection {
     fn drop(&mut self) {
         if self.inner.count.fetch_sub(1, Ordering::SeqCst) == 1 {
             // Send an unused event to the actor.
-            let _ = self.inner.unused_tx.send(self.inner.id);
+            let _ = self
+                .inner
+                .unused_tx
+                .send((self.inner.id, self.inner.generation));
         }
     }
 }
@@ -1135,6 +1212,53 @@ mod tests {
         let msg = b"still alive";
         assert_eq!(echo_client(&conn2, msg).await?, msg);
         drop(conn2);
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// Retiring a connection closes it and makes the next request dial anew.
+    /// A late retire, or the retired connection's close event, must not touch
+    /// the replacement.
+    #[tokio::test]
+    async fn retire_dials_anew_and_spares_the_replacement() -> TestResult<()> {
+        let (ids, routers, address_lookup) = echo_servers(1).await?;
+        let id = ids[0];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let pool = ConnectionPool::new(endpoint.clone(), ECHO_ALPN, test_options());
+        let conn1 = pool.get_or_connect(id).await?;
+        let cid1 = conn1.stable_id();
+        pool.retire(&conn1).await?;
+        let reason = tokio::time::timeout(Duration::from_secs(2), conn1.closed()).await?;
+        assert!(
+            matches!(reason, iroh::endpoint::ConnectionError::LocallyClosed),
+            "retired connection closed by {reason:?}"
+        );
+        let conn2 = pool.get_or_connect(id).await?;
+        let cid2 = conn2.stable_id();
+        assert_ne!(cid1, cid2, "the pool handed out the retired connection");
+        // A second retire of the old connection is stale and does nothing.
+        pool.retire(&conn1).await?;
+        drop(conn1);
+        n0_future::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            conn2.close_reason().is_none(),
+            "stale retire closed the replacement"
+        );
+        let conn3 = pool.get_or_connect(id).await?;
+        assert_eq!(
+            conn3.stable_id(),
+            cid2,
+            "the replacement was dropped from the pool"
+        );
+        let msg = b"after retire";
+        assert_eq!(echo_client(&conn3, msg).await?, msg);
+        drop(conn2);
+        drop(conn3);
         shutdown_routers(routers).await;
         endpoint.close().await;
         Ok(())
