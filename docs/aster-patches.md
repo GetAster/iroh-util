@@ -6,7 +6,7 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 
 - `main` is upstream `main` plus one commit: the Aster README preamble and this ledger. Nothing is built from `main`. It is refreshed with `git merge upstream/main` and is never reset or force-pushed. Ledger edits are commits on `main`, never on `upgrade/*`.
 - `upgrade/<repo>-v<upstream version>` (for example `upgrade/iroh-v1.4.0`, `upgrade/iroh-blobs-v0.103.1`) is the patched integration line: the upstream release plus the patches in this ledger. A new upstream base always gets a new branch, cut from the upstream release tag; Aster-only fixes and re-pins append to the current branch. Per-minor names (`upgrade/iroh-blobs-v0.103`, `upgrade/salvo-v1.0`, …) are historical. Consumers pin commits on it. Published `upgrade/*` branches and tags are never rewritten; a failed attempt is superseded by new commits and a new version.
-- Topic branches carry one change each, are named for the change (for example `feat/read-into`, `security/plumtree-bounds`), are based on the upstream release tag, and are cherry-picked with `git cherry-pick -x` onto the upgrade branch, so every upgrade-branch commit names its source.
+- Topic branches carry one change each, are named for the change (for example `feat/read-into`, `security/plumtree-bounds`), are based on the upstream release tag (or, for a patch that builds on another, on that prerequisite patch's commit, which its row names), and are cherry-picked with `git cherry-pick -x` onto the upgrade branch, so every upgrade-branch commit names its source. A topic branch a row names is not rewritten; re-cutting it onto a new upstream base takes a versioned name, `<topic>-v<upstream version>`.
 - Version: the upstream version if Aster's registry has never served that version or a higher one in the series; otherwise the next patch above Aster's highest published version. A re-pin without a code change keeps the version and takes the tag suffix `-p<n>`.
 - Tags: `aster-<repo>-v<published version>` (re-pins `aster-<repo>-v<published version>-p<n>`), created only after the Aster consumer trial passes against those exact commits, because tags cannot be moved.
 - The fork manifest is `iroh-fork-manifest.toml` in the Aster repository (the only copy).
@@ -15,7 +15,7 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 Historical and current tag schemes in this repository:
 
 - `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`.
-- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1` (a patch-block re-pin with no source change).
+- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2` (patch-block re-pins with no source change).
 
 ## Current release
 
@@ -23,17 +23,17 @@ Historical and current tag schemes in this repository:
 |---|---|
 | Upstream base | `cpfix` @ `aef1db3` (upstream PR n0-computer/iroh-util#5, over `iroh-util-v0.6.0`). Not an upstream release tag: the base is upstream's unreleased single-actor `ConnectionPool` rewrite. |
 | Integration branch | `upgrade/iroh-util-v0.6` (a historical per-minor name; the next upstream base gets `upgrade/iroh-util-v<upstream version>`) |
-| Tag | `aster-iroh-util-v0.6.3-p1` |
-| Pinned commit | `eb76016080ea037464a7de71196b6de2999736b2` |
+| Tag | `aster-iroh-util-v0.6.3-p2` |
+| Pinned commit | `a90ea88d46b3178a5f1a7d4c3e28a34a2ad80aa4` |
 | Crate version | 0.6.3 |
 | Source repository | `https://forge.emrul.dev/Aster/iroh-util.git` |
 
-The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `a4a9a76b` (Aster iroh 1.3.2) and noq, noq-udp and noq-proto to `e75f3a55` (Aster noq 1.3.2), the stack Aster links it against.
+The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `261ad623` (Aster iroh 1.4.0) and noq, noq-udp and noq-proto to `535bd884` (Aster noq 1.4.0), the stack Aster links it against.
 
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
-iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "eb76016080ea037464a7de71196b6de2999736b2" }
+iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "a90ea88d46b3178a5f1a7d4c3e28a34a2ad80aa4" }
 ```
 
 Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
@@ -55,7 +55,7 @@ Row numbers are stable patch ids shared across Aster's iroh-family forks (iroh, 
 
 ## Porting to a new upstream release
 
-Order across the iroh family: noq, then iroh, then this repository (its patch block names both by revision), then iroh-blobs (row 34 needs `ConnectionPool::retire` from row 33), then iroh-docs.
+Order across the iroh family: noq, then iroh, then the satellites in the Aster publisher's order: this repository (its patch block names noq and iroh by revision), iroh-gossip, iroh-blobs (row 34 needs `ConnectionPool::retire` from row 33), iroh-docs.
 
 Before porting, check upstream:
 
@@ -92,7 +92,7 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo check --examples --tests
 ```
 
-Gotcha when re-pinning the patch block: `cargo update -p iroh ...` kept crates.io iroh 1.0.2 and reported the patches unused; `cargo update -p iroh --precise 1.3.2` moved it.
+Gotcha when re-pinning the patch block: `cargo update -p iroh ...` kept crates.io iroh 1.0.2 and reported the patches unused; `cargo update -p iroh --precise 1.3.2` moved it. When the lock holds two iroh entries (crates.io and the fork), name the old one: `cargo update -p iroh@<old> --precise <new>`. Update only the crates you name (`cargo update -p`), and revert any unrelated lock churn.
 
 Whenever iroh-util moves, re-pin the iroh-docs fork's own `[patch.crates-io]` to it and run that fork's full suite (`cargo test --all-features`, 118 tests including `tests/sync.rs`): iroh-docs exercises the whole stack.
 
@@ -119,7 +119,15 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 ## History
 
-### 1.3.0 wave (2026-10-03 onward), current
+### 1.4.0 wave (2026-10-21), current
+
+| Upstream base | Tag | Pinned commit | Branch |
+|---|---|---|---|
+| `cpfix` @ `aef1db3` (unchanged) | `aster-iroh-util-v0.6.3-p2` | `a90ea88d46b3178a5f1a7d4c3e28a34a2ad80aa4` | `upgrade/iroh-util-v0.6` |
+
+- **2026-10-21, 0.6.3-p2** (`a90ea88d`, tag `aster-iroh-util-v0.6.3-p2`): re-pin only. No new upstream release (the base is still upstream `cpfix`), so no port. The patch block moves iroh, iroh-base and iroh-relay to `261ad623` (iroh 1.4.0, `upgrade/iroh-v1.4.0`) and noq, noq-udp and noq-proto to `535bd884` (noq 1.4.0, `upgrade/noq-v1.4.0`); the lock follows (rustls 0.23.46, rustls-webpki 0.103.16, lru 0.18.5). The commit touches only Cargo.toml's `[patch.crates-io]` and Cargo.lock. No source change; the crate stays 0.6.3 and is not republished. Validation: `cargo test --locked --all-features` lib 18; clippy `--locked --all-features --all-targets -D warnings` and fmt clean.
+
+### 1.3.0 wave (2026-10-03 onward)
 
 - **0.6.3** (`6c42d23`, tag `aster-iroh-util-v0.6.3`): row 33, `ConnectionPool::retire`, from the 2026-10-15 restart investigation.
 - **2026-10-18, 0.6.3-p1** (`eb760160`, tag `aster-iroh-util-v0.6.3-p1`): the fork had no patch block and locked iroh and noq 1.0.0 from crates.io (review finding TM-7, found by `fork_compat.py --check`). It now pins iroh, iroh-base and iroh-relay to `a4a9a76b` and noq, noq-udp and noq-proto to `e75f3a55`, and the lock follows iroh 1.3.2's transitive moves (netwatch and portmapper 0.19.3, `n0-dns-resolver` in place of hickory). No source change; the crate stays 0.6.3 and the publisher skips it as identical. Validation: lib 18, clippy `--all-features --all-targets -D warnings`, `cargo fmt --check` and `check --examples --tests` clean.
