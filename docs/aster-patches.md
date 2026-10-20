@@ -4,13 +4,15 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 
 ## Branch and tag model
 
-- `main` is the front door: upstream's README with an Aster preamble, plus this ledger. Nothing is built from `main`.
-- `upgrade/<version>` is the patched integration line for one upstream release wave: the upstream release plus the patches in this ledger. Consumers pin it by commit.
-- Topic branches carry one change each and are named for what the change is, for example `feat/read-into` or `security/plumtree-bounds`. Each is based on the upstream release tag and is cherry-picked with `git cherry-pick -x` onto the upgrade branch, so every upgrade-branch commit names its source.
-- Release tags mark the commits that are released and pinned. Published tags are never moved or rewritten. Historical tags in this repository use several schemes (listed below); new tags use `aster-<repo>-v<version>`, where `<version>` is the published version of the repository's main package (for example `aster-salvo-v1.0.4`, `aster-fory-v1.7.6-aster.1`).
-- `main` is refreshed by merging upstream `main` into it. It is not force-pushed.
+- `main` is upstream `main` plus one commit: the Aster README preamble and this ledger. Nothing is built from `main`. It is refreshed with `git merge upstream/main` and is never reset or force-pushed. Ledger edits are commits on `main`, never on `upgrade/*`.
+- `upgrade/<repo>-v<upstream version>` (for example `upgrade/iroh-v1.4.0`, `upgrade/iroh-blobs-v0.103.1`) is the patched integration line: the upstream release plus the patches in this ledger. A new upstream base always gets a new branch, cut from the upstream release tag; Aster-only fixes and re-pins append to the current branch. Per-minor names (`upgrade/iroh-blobs-v0.103`, `upgrade/salvo-v1.0`, …) are historical. Consumers pin commits on it. Published `upgrade/*` branches and tags are never rewritten; a failed attempt is superseded by new commits and a new version.
+- Topic branches carry one change each, are named for the change (for example `feat/read-into`, `security/plumtree-bounds`), are based on the upstream release tag, and are cherry-picked with `git cherry-pick -x` onto the upgrade branch, so every upgrade-branch commit names its source.
+- Version: the upstream version if Aster's registry has never served that version or a higher one in the series; otherwise the next patch above Aster's highest published version. A re-pin without a code change keeps the version and takes the tag suffix `-p<n>`.
+- Tags: `aster-<repo>-v<published version>` (re-pins `aster-<repo>-v<published version>-p<n>`), created only after the Aster consumer trial passes against those exact commits, because tags cannot be moved.
+- The fork manifest is `iroh-fork-manifest.toml` in the Aster repository (the only copy).
+- Aster does not submit patches upstream; upstream maintainers are welcome to take any patch here.
 
-Tag schemes used in this repository:
+Historical and current tag schemes in this repository:
 
 - `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`.
 - `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1` (a patch-block re-pin with no source change).
@@ -20,7 +22,7 @@ Tag schemes used in this repository:
 | Field | Value |
 |---|---|
 | Upstream base | `cpfix` @ `aef1db3` (upstream PR n0-computer/iroh-util#5, over `iroh-util-v0.6.0`). Not an upstream release tag: the base is upstream's unreleased single-actor `ConnectionPool` rewrite. |
-| Integration branch | `upgrade/iroh-util-v0.6` |
+| Integration branch | `upgrade/iroh-util-v0.6` (a historical per-minor name; the next upstream base gets `upgrade/iroh-util-v<upstream version>`) |
 | Tag | `aster-iroh-util-v0.6.3-p1` |
 | Pinned commit | `eb76016080ea037464a7de71196b6de2999736b2` |
 | Crate version | 0.6.3 |
@@ -34,7 +36,7 @@ Bootstrap pin line for source-tree builds (consumers install a versioned Aster S
 iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "eb76016080ea037464a7de71196b6de2999736b2" }
 ```
 
-Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. `github.com/aster-rpc/iroh-util` remains as the upstream-facing copy.
+Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
 
 ## Patches
 
@@ -62,15 +64,24 @@ Before porting, check upstream:
 
 ```bash
 git fetch --all --tags --prune
-git switch -c upgrade/iroh-util-<new-version> <new-upstream-base>
-# re-point [patch.crates-io] at the new iroh / noq fork revs (iroh, iroh-base, iroh-relay; noq, noq-udp, noq-proto)
+git push origin <upstream-tag>          # mirror the upstream release tag (e.g. iroh-util-v0.7.0) to the forge
+git switch -c upgrade/iroh-util-v<upstream version> <upstream-tag>
+# re-point [patch.crates-io] at the new iroh / noq fork revs (iroh, iroh-base, iroh-relay; noq, noq-udp, noq-proto), commit
 git cherry-pick -x c6ca9970a3     # row 24 witness tests (as needed on the new base)
 git cherry-pick -x 5b67790        # row 33
-git tag -a aster-iroh-util-v<published version> -m "Aster iroh-util v<published version>"
-git push origin upgrade/iroh-util-<new-version> aster-iroh-util-v<published version>
+# version bump, only if the version rule requires it (Aster's registry has already
+# served <upstream version> or higher in the series, as it has 0.6.1..0.6.3):
+# set the crate to the next patch above Aster's highest published, then
+git commit -am "chore: release <published version>"
+git push origin upgrade/iroh-util-v<upstream version>
+# do not tag yet: tag after the consumer trial (below)
 ```
 
-Prefer `cherry-pick -x`. Do not rewrite a published `upgrade/*` branch or tag unless you are deliberately replacing a failed attempt.
+The current base is not an upstream release tag (upstream `cpfix` `aef1db3`, see Current release). Once upstream releases a version containing PR #5, cut the new branch from that release tag as above.
+
+Prefer `cherry-pick -x`. Published `upgrade/*` branches and tags are never rewritten; a failed attempt is superseded by new commits and a new version.
+
+An Aster-only fix on the current base is a topic branch, cherry-picked `-x` onto the current upgrade branch, followed by a version-bump commit to the next patch above Aster's highest published version (as 0.6.3 was cut for row 33). A re-pin without a code change is a commit on the current upgrade branch with no version bump, tagged `aster-iroh-util-v<current version>-p<n>` after the consumer trial (as `aster-iroh-util-v0.6.3-p1` was).
 
 Validate in this repository:
 
@@ -96,7 +107,15 @@ uv run maturin develop -m bindings/python/rust/Cargo.toml
 uv run pytest tests/python/ -v --timeout=30
 ```
 
-Update the fork manifest (canonical `docs/aster-fork-manifest.toml` in the Aster iroh fork, `[forks.iroh-util]`; synced copy `iroh-fork-manifest.toml` in the Aster repository) and this ledger's Current release section. Local path-override consumers (for example portal-sync) build whatever is checked out, so switch the local checkout to the released tag after publishing.
+Tag only after the Aster consumer trial passes against these exact commits (tags cannot be moved):
+
+```bash
+git tag -a aster-iroh-util-v<published version> -m "Aster iroh-util v<published version>" <release commit>
+git push origin aster-iroh-util-v<published version>
+# re-pin only: git tag -a aster-iroh-util-v<current version>-p<n> -m "..." <re-pin commit>
+```
+
+Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks.iroh-util]`), and this ledger's Current release section on `main` (merge upstream `main` first). Local path-override consumers (for example portal-sync) build whatever is checked out, so switch the local checkout to the released tag after publishing.
 
 ## History
 
