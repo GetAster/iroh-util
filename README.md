@@ -1,3 +1,9 @@
+> **Aster fork.** This repository is [iroh-util](https://github.com/n0-computer/iroh-util) plus patches maintained by
+> [Aster](https://aster.site), documented in the [Aster patch ledger](docs/aster-patches.md).
+> The patched code is on the `upgrade/*` branches; this `main` branch is upstream
+> `main` plus this notice and the ledger. Upstream maintainers are welcome to
+> incorporate our patches at their discretion.
+
 # iroh-util
 
 ![CI](https://github.com/n0-computer/iroh-util/actions/workflows/ci.yml/badge.svg)
