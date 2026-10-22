@@ -15,7 +15,7 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 Historical and current tag schemes in this repository:
 
 - `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`.
-- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2` (patch-block re-pins with no source change).
+- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2`, `-v0.6.3-p3`, `-v0.6.3-p4` (patch-block re-pins with no source change).
 
 ## Current release
 
@@ -23,17 +23,17 @@ Historical and current tag schemes in this repository:
 |---|---|
 | Upstream base | `cpfix` @ `aef1db3` (upstream PR n0-computer/iroh-util#5, over `iroh-util-v0.6.0`). Not an upstream release tag: the base is upstream's unreleased single-actor `ConnectionPool` rewrite. |
 | Integration branch | `upgrade/iroh-util-v0.6` (a historical per-minor name; the next upstream base gets `upgrade/iroh-util-v<upstream version>`) |
-| Tag | `aster-iroh-util-v0.6.3-p2` |
-| Pinned commit | `a90ea88d46b3178a5f1a7d4c3e28a34a2ad80aa4` |
+| Tag | `aster-iroh-util-v0.6.3-p4` |
+| Pinned commit | `c9b91fce2eb8c1a30cfb27b24888f1b0ecaab556` |
 | Crate version | 0.6.3 |
 | Source repository | `https://forge.emrul.dev/Aster/iroh-util.git` |
 
-The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `261ad623` (Aster iroh 1.4.0) and noq, noq-udp and noq-proto to `535bd884` (Aster noq 1.4.0), the stack Aster links it against.
+The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `91a92aa0` (Aster iroh 1.4.0-p2) and noq, noq-udp and noq-proto to `a3c70b7a` (Aster noq 1.4.2), the stack Aster links it against.
 
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
-iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "a90ea88d46b3178a5f1a7d4c3e28a34a2ad80aa4" }
+iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "c9b91fce2eb8c1a30cfb27b24888f1b0ecaab556" }
 ```
 
 Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
@@ -119,7 +119,17 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 ## History
 
-### 1.4.0 wave (2026-10-21), current
+### noq 1.4.1 and 1.4.2 re-pins (2026-10-22), current
+
+| Upstream base | Tag | Pinned commit | Branch |
+|---|---|---|---|
+| `cpfix` @ `aef1db3` (unchanged) | `aster-iroh-util-v0.6.3-p4` | `c9b91fce2eb8c1a30cfb27b24888f1b0ecaab556` | `upgrade/iroh-util-v0.6` |
+| `cpfix` @ `aef1db3` (unchanged) | `aster-iroh-util-v0.6.3-p3` | `8c7947b638f1b5b9524b7b4aaa7c48855cf0e3b2` | `upgrade/iroh-util-v0.6` |
+
+- **0.6.3-p3** (`8c7947b6`): re-pin only, to iroh `41ec78b1` (1.4.0-p1) and noq `13dcb5b7` (1.4.1).
+- **0.6.3-p4** (`c9b91fce`): re-pin only, to iroh `91a92aa0` (1.4.0-p2) and noq `a3c70b7a` (1.4.2, incremental BBRv3 packet history); the lock follows with no other moves. Both touch only Cargo.toml's `[patch.crates-io]` and Cargo.lock; the crate stays 0.6.3 and is not republished. Validation on p4: `cargo test --locked --all-features` lib 18; clippy `--locked --all-features --all-targets -D warnings` and fmt clean.
+
+### 1.4.0 wave (2026-10-21)
 
 | Upstream base | Tag | Pinned commit | Branch |
 |---|---|---|---|
