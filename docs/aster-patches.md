@@ -23,17 +23,17 @@ Historical and current tag schemes in this repository:
 |---|---|
 | Upstream base | `cpfix` @ `aef1db3` (upstream PR n0-computer/iroh-util#5, over `iroh-util-v0.6.0`). Not an upstream release tag: the base is upstream's unreleased single-actor `ConnectionPool` rewrite. |
 | Integration branch | `upgrade/iroh-util-v0.6` (a historical per-minor name; the next upstream base gets `upgrade/iroh-util-v<upstream version>`) |
-| Tag | `aster-iroh-util-v0.6.3-p4` |
-| Pinned commit | `c9b91fce2eb8c1a30cfb27b24888f1b0ecaab556` |
+| Tag | `aster-iroh-util-v0.6.3-p5` |
+| Pinned commit | `16a93b49b482c4e7874ca1e91cae72f2cfb2616c` |
 | Crate version | 0.6.3 |
 | Source repository | `https://forge.emrul.dev/Aster/iroh-util.git` |
 
-The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `91a92aa0` (Aster iroh 1.4.0-p2) and noq, noq-udp and noq-proto to `a3c70b7a` (Aster noq 1.4.2), the stack Aster links it against.
+The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `68b684ea` (Aster iroh 1.4.1) and noq, noq-udp and noq-proto to `a3c70b7a` (Aster noq 1.4.2), the stack Aster links it against.
 
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
-iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "c9b91fce2eb8c1a30cfb27b24888f1b0ecaab556" }
+iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "16a93b49b482c4e7874ca1e91cae72f2cfb2616c" }
 ```
 
 Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
@@ -119,7 +119,15 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 ## History
 
-### noq 1.4.1 and 1.4.2 re-pins (2026-10-22), current
+### iroh 1.4.1 re-pin (2026-10-25), current
+
+| Upstream base | Tag | Pinned commit | Branch |
+|---|---|---|---|
+| `cpfix` @ `aef1db3` (unchanged) | `aster-iroh-util-v0.6.3-p5` | `16a93b49b482c4e7874ca1e91cae72f2cfb2616c` | `upgrade/iroh-util-v0.6` |
+
+- **`aster-iroh-util-v0.6.3-p5`** (`16a93b49`): re-pin only, to iroh `68b684ea` (`aster-iroh-v1.4.1`: the port onto upstream 1.4.1 and row 44, the net report no longer waiting 3 s on an IPv6 path that drops UDP). Only Cargo.toml's `[patch.crates-io]` and Cargo.lock change; the crate is not republished. Validation: `cargo test --locked --all-features`, 18 passed.
+
+### noq 1.4.1 and 1.4.2 re-pins (2026-10-22)
 
 | Upstream base | Tag | Pinned commit | Branch |
 |---|---|---|---|
