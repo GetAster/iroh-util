@@ -202,7 +202,13 @@ pub enum ConnectionPoolError {
 
 enum ActorMessage {
     RequestRef(RequestRef),
-    ConnectionShutdown { id: EndpointId },
+    ConnectionShutdown {
+        id: EndpointId,
+    },
+    /// See [`ConnectionPool::retire`].
+    Retire {
+        conn_id: ConnId,
+    },
 }
 
 struct RequestRef {
@@ -428,7 +434,32 @@ impl Actor {
                 trace!(%id, "shutdown requested");
                 self.remove_peer(id);
             }
+            ActorMessage::Retire { conn_id } => self.handle_retire(conn_id),
         }
+    }
+
+    /// Retires a connection that its holder found broken.
+    ///
+    /// Only acts if the connection is still the peer's current one: the peer
+    /// holds one entry, so a replacement (ready or still connecting) has a
+    /// different generation, and a late or repeated retire leaves it alone.
+    /// The connection's slot is freed and it leaves the unused set, so the next
+    /// request for the peer dials anew.
+    fn handle_retire(&mut self, conn_id: ConnId) {
+        let current = matches!(
+            self.peers.get(&conn_id.peer),
+            Some(PeerState::Ready { generation, .. }) if *generation == conn_id.generation
+        );
+        if !current {
+            debug!(%conn_id, "stale retire, ignoring");
+            return;
+        }
+        let Some(PeerState::Ready { connection, .. }) = self.peers.remove(&conn_id.peer) else {
+            return;
+        };
+        self.unused.remove(conn_id);
+        connection.close(0u32.into(), b"retired");
+        debug!(%conn_id, "retired connection");
     }
 
     fn handle_request(&mut self, req: RequestRef) {
@@ -747,6 +778,33 @@ impl ConnectionPool {
     pub async fn close(&self, id: EndpointId) -> std::result::Result<(), ConnectionPoolError> {
         self.tx
             .send(ActorMessage::ConnectionShutdown { id })
+            .await
+            .map_err(|_| e!(ConnectionPoolError::Shutdown))?;
+        Ok(())
+    }
+
+    /// Retire a connection that the caller found broken.
+    ///
+    /// If the pool still hands out `conn` for its peer, the pool closes it with
+    /// the reason `retired` and forgets it, so the next
+    /// [`get_or_connect`](Self::get_or_connect) for that peer dials anew. Every
+    /// other holder of the connection sees it closed.
+    ///
+    /// Use this when the connection no longer reaches the peer, for example
+    /// because the peer stopped acknowledging packets after a restart on a new
+    /// address. Without it, the pool keeps handing out such a connection until
+    /// QUIC's idle timeout closes it.
+    ///
+    /// Does nothing if the pool has already replaced or dropped `conn`, so a
+    /// fresh connection to the same peer, or a dial for it that is still
+    /// running, is never disturbed by a late call.
+    pub async fn retire(
+        &self,
+        conn: &ConnectionRef,
+    ) -> std::result::Result<(), ConnectionPoolError> {
+        let conn_id = conn._permit.inner.conn_id;
+        self.tx
+            .send(ActorMessage::Retire { conn_id })
             .await
             .map_err(|_| e!(ConnectionPoolError::Shutdown))?;
         Ok(())
@@ -1346,6 +1404,96 @@ mod tests {
         for h in backlog {
             h.abort();
         }
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// A retired connection closes, the next get dials anew, and a late or
+    /// repeated retire of the old connection leaves the replacement alone.
+    #[tokio::test]
+    async fn retire_dials_anew_and_spares_the_replacement() -> TestResult<()> {
+        let (ids, routers, address_lookup) = echo_servers(1).await?;
+        let id = ids[0];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let pool = ConnectionPool::new(endpoint.clone(), ECHO_ALPN, test_options());
+        let conn1 = pool.get_or_connect(id).await?;
+        let cid1 = conn1.stable_id();
+        pool.retire(&conn1).await?;
+        let reason = tokio::time::timeout(Duration::from_secs(2), conn1.closed()).await?;
+        assert!(
+            matches!(reason, iroh::endpoint::ConnectionError::LocallyClosed),
+            "retired connection closed by {reason:?}"
+        );
+        let conn2 = pool.get_or_connect(id).await?;
+        let cid2 = conn2.stable_id();
+        assert_ne!(cid1, cid2, "the pool handed out the retired connection");
+        // A second retire of the old connection is stale and does nothing.
+        pool.retire(&conn1).await?;
+        drop(conn1);
+        n0_future::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            conn2.close_reason().is_none(),
+            "stale retire closed the replacement"
+        );
+        let conn3 = pool.get_or_connect(id).await?;
+        assert_eq!(
+            conn3.stable_id(),
+            cid2,
+            "the replacement was dropped from the pool"
+        );
+        let msg = b"after retire";
+        assert_eq!(echo_client(&conn3, msg).await?, msg);
+        drop(conn2);
+        drop(conn3);
+        shutdown_routers(routers).await;
+        endpoint.close().await;
+        Ok(())
+    }
+
+    /// Retiring a connection that sits in the unused set removes its entry
+    /// and frees its slot, and a stale retire against a dial that is still
+    /// running neither disturbs the dial nor counts against it.
+    #[tokio::test]
+    async fn retire_removes_an_unused_connection_and_spares_a_pending_dial() -> TestResult<()> {
+        let (ids, routers, address_lookup) = echo_servers(1).await?;
+        let id = ids[0];
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Default)
+            .address_lookup(address_lookup)
+            .bind()
+            .await?;
+        let conn = endpoint.connect(id, ECHO_ALPN).await?;
+        let (mut actor, _inbox) = Actor::new(endpoint.clone(), ECHO_ALPN, test_options());
+        let conn_id = insert_ready(&mut actor, &conn);
+        assert!(actor.unused.since.contains_key(&conn_id));
+
+        actor.handle_retire(conn_id);
+        assert!(actor.peers.is_empty(), "the slot was not freed");
+        assert!(actor.unused.since.is_empty() && actor.unused.order.is_empty());
+        let reason = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await?;
+        assert!(matches!(
+            reason,
+            iroh::endpoint::ConnectionError::LocallyClosed
+        ));
+
+        // A dial for the same peer is now running. A repeat of the retire
+        // must leave it in place, with its waiters.
+        let (tx, mut rx) = oneshot::channel();
+        actor.handle_request(RequestRef { id, tx });
+        assert_eq!(actor.connecting.len(), 1);
+        actor.handle_retire(conn_id);
+        assert!(matches!(
+            actor.peers.get(&id),
+            Some(PeerState::Connecting { .. })
+        ));
+        assert!(rx.try_recv().is_err(), "the dial's waiter was answered");
+        assert_eq!(actor.connecting.len(), 1);
+
         shutdown_routers(routers).await;
         endpoint.close().await;
         Ok(())
