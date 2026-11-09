@@ -14,26 +14,26 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 
 Historical and current tag schemes in this repository:
 
-- `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`.
+- `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`, `-v0.7.1001`.
 - `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2`, `-v0.6.3-p3`, `-v0.6.3-p4` (patch-block re-pins with no source change).
 
 ## Current release
 
 | Field | Value |
 |---|---|
-| Upstream base | `cpfix` @ `aef1db3` (upstream PR n0-computer/iroh-util#5, over `iroh-util-v0.6.0`). Not an upstream release tag: the base is upstream's unreleased single-actor `ConnectionPool` rewrite. |
-| Integration branch | `upgrade/iroh-util-v0.6` (a historical per-minor name; the next upstream base gets `upgrade/iroh-util-v<upstream version>`) |
-| Tag | `aster-iroh-util-v0.6.3-p7` |
-| Pinned commit | `b28211ec000f013d7ad49cc9dd2fb93518c1ec8f` |
-| Crate version | 0.6.3 |
+| Upstream base | `v0.7.0` (`1003b74`), the first upstream release with the single-actor `ConnectionPool` (#5, with #12 squashed in) and slot reservation (#18) |
+| Integration branch | `upgrade/iroh-util-v0.7.0` |
+| Tag | `aster-iroh-util-v0.7.1001` |
+| Pinned commit | `bfef8edbbe599bc4ea892860ea5218cf4a006844` |
+| Crate version | 0.7.1001 |
 | Source repository | `https://forge.emrul.dev/Aster/iroh-util.git` |
 
-The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `9ba1447d` (Aster iroh 1.4.2002) and noq, noq-udp and noq-proto to `379f73677c` (Aster noq 1.4.1001), the stack Aster links it against.
+The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `9ba1447d` (Aster iroh 1.4.2002) and noq, noq-udp and noq-proto to `379f73677c` (Aster noq 1.4.1001), the stack Aster links it against (`168bc6f`, unchanged revisions from 0.6.3-p7). Upstream 0.7 marks `Options` and the error enums `#[non_exhaustive]` (#16, `85ae65e`): callers build `Options` from `Default` and set fields, as Aster's core does since this release.
 
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
-iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "b28211ec000f013d7ad49cc9dd2fb93518c1ec8f" }
+iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "bfef8edbbe599bc4ea892860ea5218cf4a006844" }
 ```
 
 Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
@@ -44,13 +44,14 @@ Row numbers are stable patch ids shared across Aster's iroh-family forks (iroh, 
 
 | Id | Topic branch | What | Why / what in Aster depends on it | Commits (topic / upgrade) | Status | Conflict or porting notes |
 |---|---|---|---|---|---|---|
-| 24 | upstream `cpfix` (`aef1db3`) + `test/connection-pool-witnesses` (tip `c6ca9970a3`, on `aef1db3`; backfilled) | Adopts upstream's single-actor `ConnectionPool` rewrite (n0-computer/iroh-util PR #5), replacing the 0.6.0 design whose two blocking-send cycles deadlocked the pool at more than 100 concurrent `get_or_connect` calls (portal-sync's freeze-apply-window wedge). Adds three Aster witness tests: a 300-connect burst resolves under saturation; dropping the pool terminates the actor and closes held connections; slow-peer backlogs do not starve an unrelated peer. File: `src/connection_pool.rs`. | Every portal-sync blob fetch and docs sync dial goes through this pool; the deadlock silently froze whole daemons. | `aef1db3` + `c6ca9970a3` / `396759d` + `afed9e6`; released as 0.6.2 | carried | When a released iroh-util ≥ 0.6.x contains PR #5, this fork collapses back to carrying only the witness tests. The topic branch was reconstructed after release, so its `(cherry picked from …)` trailers point at the upgrade-branch commits (see History). |
-| 33 | `fix/pool-retire-connection` (tip `5b67790`, on upstream `cpfix` `aef1db3`) | Adds `ConnectionPool::retire(&ConnectionRef)`: closes the connection with reason `retired` and forgets it, only while the pool still holds that same connection (matched by connect generation), so the next `get_or_connect` dials anew and a late or repeated retire never closes the replacement. Ready connections, close-watcher events and unused events carry the generation, so no event for a replaced connection touches its successor. `close(id)` is unchanged. File: `src/connection_pool.rs`. | Root cause 3 of the Aster restart/reconnect investigation (Aster repository, `docs/_internal/investigations/2026-10-15-restart-reconnect.md`): the iroh-blobs downloader (iroh-blobs fork row 34, which requires 0.6.3) must drop its pooled connection to a provider that restarted on a new port without killing a fresh replacement. | `5b67790` / `10c23d8`; released as 0.6.3 at `6c42d23` | carried | **Aster's own; no upstream equivalent (checked 2026-10-15): n0-computer/iroh-util issues/PRs #1–#19 (open #2 per-peer backlog; draft #13 adopts incoming connections and marks the older one `superseded`, a different trigger; merged-unreleased #12 generation-tagged events, #17, #18 slot reservation) and n0-computer/iroh-blobs #141, #185, #213, #224, #226, #227, #229.** Medium conflict risk against upstream `main`'s #12/#18 rewrite (`ConnId`, `UnusedSet`): on re-port, express `retire` as "remove `current` if its ConnId matches, close with `retired`" and drop the generation plumbing that #12 already provides. Test: `retire_dials_anew_and_spares_the_replacement` (the retired connection closes `LocallyClosed`; the next get dials a new one; a stale second retire leaves the replacement open and pooled); it fails if retire ignores the generation. lib 18 single-threaded, clippy `--all-targets --all-features -D warnings` and fmt clean. |
+| 24 | `test/connection-pool-witnesses-v0.7.0` (tip `db2c4dc`, on `v0.7.0`; the 0.6 topic was `test/connection-pool-witnesses` `c6ca9970a3` on `cpfix` `aef1db3`) | Three Aster witness tests for the single-actor `ConnectionPool`: a 300-connect burst resolves under saturation; dropping the pool terminates the actor and closes held connections; slow-peer backlogs do not starve an unrelated peer. File: `src/connection_pool.rs` (tests only). Until 0.7.1001 the row also carried upstream's then-unreleased rewrite (PR #5, base `cpfix` `aef1db3`), replacing the 0.6.0 design whose two blocking-send cycles deadlocked the pool at more than 100 concurrent `get_or_connect` calls (portal-sync's freeze-apply-window wedge). | Every portal-sync blob fetch and docs sync dial goes through this pool; the witnesses pin the deadlock and starvation behaviour Aster depends on. | `db2c4dc` / `a180db4` (0.6: `aef1db3` + `c6ca9970a3` / `396759d` + `afed9e6`, released as 0.6.2) | carried (tests only) | The rewrite is upstream in v0.7.0 (`a1e54dc`, #5 with #12 squashed in; `603d890`, #18 slot reservation; `0f1b5d5`, #17), so only the witness tests are carried. The 0.6 topic branch was reconstructed after release, so its `(cherry picked from …)` trailers point at the upgrade-branch commits (see History). |
+| 33 | `fix/pool-retire-connection-v0.7.0` (tip `be02c3d`, on `v0.7.0`; the 0.6 topic was `fix/pool-retire-connection` `5b67790` on `cpfix` `aef1db3`) | Adds `ConnectionPool::retire(&ConnectionRef)`: closes the connection with reason `retired` and forgets it, only while the pool still holds that same connection (matched by upstream's `ConnId`), so the next `get_or_connect` dials anew and a late or repeated retire never closes the replacement or a dial still running. It also takes the connection out of the unused set. `close(id)` is unchanged. File: `src/connection_pool.rs`. | Root cause 3 of the Aster restart/reconnect investigation (Aster repository, `docs/_internal/investigations/2026-10-15-restart-reconnect.md`): the iroh-blobs downloader (iroh-blobs fork row 34, which requires 0.7.1001 since iroh-blobs 0.104.2001) must drop its pooled connection to a provider that restarted on a new port without killing a fresh replacement. | `be02c3d` / `4ef2dca` (0.6: `5b67790` / `10c23d8`, released as 0.6.3 at `6c42d23`) | re-cut | **Aster's own; no upstream equivalent in v0.7.0** (upstream draft #13 adopts incoming connections and marks the older one `superseded`, a different trigger). Re-expressed on upstream's `ConnId`/`UnusedSet` (#5/#12): "remove the peer's entry if its `ConnId` matches, take it out of the unused set, close with `retired`"; Aster's own generation plumbing is dropped. Same signature and error type as 0.6.3. Tests: `retire_dials_anew_and_spares_the_replacement` (fails if retire ignores the id) and, new, `retire_removes_an_unused_connection_and_spares_a_pending_dial`. |
 
 ### Upstreamed or dropped
 
 | Patch | Commit / tag | Status | When and why |
 |---|---|---|---|
+| Row 24's adoption of upstream's single-actor rewrite (PR #5 at `cpfix` `aef1db3`) | `396759d` (0.6.2) | upstreamed | Released upstream in v0.7.0 (`a1e54dc`, with #12; #18 `603d890`). Dropped from the stack in 0.7.1001 (2026-11-09); the row keeps the witness tests. |
 | Independent Aster fix for the 0.6.0 connection-pool deadlock (0.6.1) | `fc724bd`, tag `aster-iroh-util-v0.6.1` | dropped | Published to the registry but never consumed; superseded on 2026-08-25 by 0.6.2, which adopts upstream's PR #5 rewrite instead (row 24). The tag is preserved for the record. Do not consume or republish it. |
 
 ## Porting to a new upstream release
@@ -59,16 +60,16 @@ Order across the iroh family: noq, then iroh, then the satellites in the Aster p
 
 Before porting, check upstream:
 
-1. If a released iroh-util contains PR #5, base on that release and keep only the witness tests from row 24.
-2. If upstream `main`'s #12/#18 rewrite (`ConnId`, `UnusedSet`) has been released, re-express row 33 on it as described in its conflict notes.
+1. Since v0.7.0 the base is an upstream release tag; row 24 is tests only.
+2. Check whether upstream has gained a retire-by-identity API (row 33); if so, map `ConnectionPool::retire` onto it.
 
 ```bash
 git fetch --all --tags --prune
 git push origin <upstream-tag>          # mirror the upstream release tag (e.g. iroh-util-v0.7.0) to the forge
 git switch -c upgrade/iroh-util-v<upstream version> <upstream-tag>
 # re-point [patch.crates-io] at the new iroh / noq fork revs (iroh, iroh-base, iroh-relay; noq, noq-udp, noq-proto), commit
-git cherry-pick -x c6ca9970a3     # row 24 witness tests (as needed on the new base)
-git cherry-pick -x 5b67790        # row 33
+git cherry-pick -x db2c4dc        # row 24 witness tests
+git cherry-pick -x be02c3d        # row 33
 # version bump, only if the version rule requires it (Aster's registry has already
 # served <upstream version> or higher in the series, as it has 0.6.1..0.6.3):
 # set the crate to the next option E version (`1000 * (upstream_patch + 1) + n`), then
@@ -76,8 +77,6 @@ git commit -am "chore: release <published version>"
 git push origin upgrade/iroh-util-v<upstream version>
 # do not tag yet: tag after the consumer trial (below)
 ```
-
-The current base is not an upstream release tag (upstream `cpfix` `aef1db3`, see Current release). Once upstream releases a version containing PR #5, cut the new branch from that release tag as above.
 
 Prefer `cherry-pick -x`. Published `upgrade/*` branches and tags are never rewritten; a failed attempt is superseded by new commits and a new version.
 
@@ -119,7 +118,15 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 ## History
 
-### iroh 1.4.2002 and noq 1.4.1001 re-pin (2026-10-28), current
+### iroh-family upstream wave (2026-11-09), current
+
+| Upstream base | Tag | Pinned commit | Branch |
+|---|---|---|---|
+| `v0.7.0` | `aster-iroh-util-v0.7.1001` | `bfef8edbbe599bc4ea892860ea5218cf4a006844` | `upgrade/iroh-util-v0.7.0` |
+
+- **0.7.1001** (`bfef8edb`): port onto upstream v0.7.0. Stack: `168bc6f` patch block (iroh 1.4.2002 `9ba1447d`, noq 1.4.1001 `379f73677c`), `a180db4` row 24 witness tests (from `db2c4dc`), `4ef2dca` row 33 re-cut on `ConnId` (from `be02c3d`), `bfef8ed` version. Row 24's rewrite half is upstream (#5/#12/#18). Option E: upstream patch 0, n = 1. iroh-blobs 0.104.2001 requires it (iroh-blobs row 34); Aster builds `Options` from `Default` because upstream made it `#[non_exhaustive]`. Validation at the pinned commit: `cargo test --locked --all-features -- --test-threads=1` lib 28 and doc 1 passed; clippy `--all-features --all-targets -D warnings` clean.
+
+### iroh 1.4.2002 and noq 1.4.1001 re-pin (2026-10-28)
 
 | Upstream base | Tag | Pinned commit | Branch |
 |---|---|---|---|
