@@ -30,6 +30,8 @@ Historical and current tag schemes in this repository:
 
 The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `b010df8a65` (Aster iroh 1.5.1001, tag `aster-iroh-v1.5.1001`) and noq, noq-udp and noq-proto to `819373faf` (Aster noq 1.5.1001, tag `aster-noq-v1.5.1001`), the stack Aster links it against (`e83da6f8`, the `-p2` re-pin; `f91c1f97`, the `-p1` re-pin, held iroh 1.4.2003 and noq 1.4.1002; `168bc6f` held iroh 1.4.2002 and noq 1.4.1001). The crate resolves netdev 0.47.0 and netwatch and portmapper 0.20.2 from crates.io inside this fork; the Aster netdev patch entry and the bridge patches are Aster-root entries. Upstream 0.7 marks `Options` and the error enums `#[non_exhaustive]` (#16, `85ae65e`): callers build `Options` from `Default` and set fields, as Aster's core does since this release.
 
+**Re-pin 2026-11-24 (`aster-iroh-util-v0.7.1001-p3`, `489f339d`), supersedes the iroh pin above:** the fork's `[patch.crates-io]` and lock name iroh `b0fac795ec` (Aster iroh 1.5.1002, tag `aster-iroh-v1.5.1002`). iroh 1.5.1002 differs from 1.5.1001 only in manifests: iroh now requires the iroh-relay it ships (iroh ledger row `relay-requirement`). No version change; noq unchanged. Aster's `fork_compat` ran the suite on it: 0 failed.
+
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
