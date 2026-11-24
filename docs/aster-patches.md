@@ -130,7 +130,7 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 | Upstream base | Tag | Pinned commit | Branch |
 |---|---|---|---|
-| `v0.7.0` | `aster-iroh-util-v0.7.1001-p1` | `e83da6f8605adf071a6a846a0d804fb418b606a6` | `upgrade/iroh-util-v0.7.0` |
+| `v0.7.0` | `aster-iroh-util-v0.7.1001-p1` | `f91c1f970d8eb938239fe13dee59588da4369fb1` | `upgrade/iroh-util-v0.7.0` |
 
 - **`aster-iroh-util-v0.7.1001-p1`** (`f91c1f97`): re-pin only ("build: re-pin noq 1.4.1002 and iroh 1.4.2003"), to iroh `370b54434` (Aster iroh 1.4.2003) and noq `4e193fb2d` (Aster noq 1.4.1002), the "vpn-paths" wave. No code or version change; the crate stays 0.7.1001. Validation: 28 passed.
 
