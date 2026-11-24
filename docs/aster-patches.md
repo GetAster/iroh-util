@@ -15,7 +15,7 @@ This repository is Aster's fork of [n0-computer/iroh-util](https://github.com/n0
 Historical and current tag schemes in this repository:
 
 - `aster-iroh-util-v<version>`: `aster-iroh-util-v0.6.1`, `-v0.6.2`, `-v0.6.3`, `-v0.7.1001`.
-- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2`, `-v0.6.3-p3`, `-v0.6.3-p4` (patch-block re-pins with no source change).
+- `aster-iroh-util-v<version>-p<n>`, a later commit at the same crate version: `aster-iroh-util-v0.6.3-p1`, `-v0.6.3-p2`, `-v0.6.3-p3`, `-v0.6.3-p4`, `aster-iroh-util-v0.7.1001-p1`, `-p2` (patch-block re-pins with no source change).
 
 ## Current release
 
@@ -23,17 +23,17 @@ Historical and current tag schemes in this repository:
 |---|---|
 | Upstream base | `v0.7.0` (`1003b74`), the first upstream release with the single-actor `ConnectionPool` (#5, with #12 squashed in) and slot reservation (#18) |
 | Integration branch | `upgrade/iroh-util-v0.7.0` |
-| Tag | `aster-iroh-util-v0.7.1001-p1` (`aster-iroh-util-v0.7.1001` is the previous pin) |
-| Pinned commit | `f91c1f970d8eb938239fe13dee59588da4369fb1` |
+| Tag | `aster-iroh-util-v0.7.1001-p2` (`aster-iroh-util-v0.7.1001-p1` is the previous pin) |
+| Pinned commit | `e83da6f8605adf071a6a846a0d804fb418b606a6` |
 | Crate version | 0.7.1001 |
 | Source repository | `https://forge.emrul.dev/Aster/iroh-util.git` |
 
-The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `370b54434` (Aster iroh 1.4.2003) and noq, noq-udp and noq-proto to `4e193fb2d` (Aster noq 1.4.1002), the stack Aster links it against (`f91c1f97`, the `-p1` re-pin; `168bc6f` held iroh 1.4.2002 and noq 1.4.1001). Upstream 0.7 marks `Options` and the error enums `#[non_exhaustive]` (#16, `85ae65e`): callers build `Options` from `Default` and set fields, as Aster's core does since this release.
+The fork's own `[patch.crates-io]` pins iroh, iroh-base and iroh-relay to `b010df8a65` (Aster iroh 1.5.1001, tag `aster-iroh-v1.5.1001`) and noq, noq-udp and noq-proto to `819373faf` (Aster noq 1.5.1001, tag `aster-noq-v1.5.1001`), the stack Aster links it against (`e83da6f8`, the `-p2` re-pin; `f91c1f97`, the `-p1` re-pin, held iroh 1.4.2003 and noq 1.4.1002; `168bc6f` held iroh 1.4.2002 and noq 1.4.1001). The crate resolves netdev 0.47.0 and netwatch and portmapper 0.20.2 from crates.io inside this fork; the Aster netdev patch entry and the bridge patches are Aster-root entries. Upstream 0.7 marks `Options` and the error enums `#[non_exhaustive]` (#16, `85ae65e`): callers build `Options` from `Default` and set fields, as Aster's core does since this release.
 
 Bootstrap pin line for source-tree builds (consumers install a versioned Aster SDK release instead and must not copy this):
 
 ```toml
-iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "f91c1f970d8eb938239fe13dee59588da4369fb1" }
+iroh-util = { git = "https://forge.emrul.dev/Aster/iroh-util.git", rev = "e83da6f8605adf071a6a846a0d804fb418b606a6" }
 ```
 
 Where this fork lives: iroh-util was a checksum-verified registry bridge until 2026-08-25, when it was promoted to a fork for the connection-pool deadlock (row 24). It first lived at `github.com/aster-rpc/iroh-util`, until the Forgejo org repository existed. It then moved to Forgejo because it was the last fork not there, and the only one whose fetch could be refused by someone else: GitHub rate-limits anonymous git per source address, and when the Forge host crossed that limit the release stopped here, reporting "could not read Username for 'https://github.com'", which reads like a private repository rather than a throttled public one. The Forgejo repository is the same history (same commit ids, same tags), and the Aster publisher (`publish-native-stack.py`) checks out the pinned commit and fails unless `git rev-parse HEAD` matches, so provenance rests on the hash, not the hostname. Forgejo push-mirrors it to `github.com/getaster/iroh-util`, the public copy.
@@ -118,11 +118,19 @@ Update `iroh-fork-manifest.toml` in the Aster repository (the only copy; `[forks
 
 ## History
 
-### iroh 1.4.2003 and noq 1.4.1002 re-pin (2026-11-10), current
+### iroh 1.5.1001 and noq 1.5.1001 re-pin (2026-11-24), current
 
 | Upstream base | Tag | Pinned commit | Branch |
 |---|---|---|---|
-| `v0.7.0` | `aster-iroh-util-v0.7.1001-p1` | `f91c1f970d8eb938239fe13dee59588da4369fb1` | `upgrade/iroh-util-v0.7.0` |
+| `v0.7.0` | `aster-iroh-util-v0.7.1001-p2` | `e83da6f8605adf071a6a846a0d804fb418b606a6` | `upgrade/iroh-util-v0.7.0` |
+
+- **`aster-iroh-util-v0.7.1001-p2`** (`e83da6f8`): re-pin only ("build: re-pin noq 1.5.1001 and iroh 1.5.1001"), to iroh `b010df8a65` (Aster iroh 1.5.1001) and noq `819373faf` (Aster noq 1.5.1001), in the 2026-11-24 fork-pin wave (noq/iroh 1.5.0, Salvo 1.2.1, Fory 1.7.8). No code or version change; the crate stays 0.7.1001 and is not republished. Upstream has no release after v0.7.0 (`upstream/main` equals the tag), so rows 24 and 33 are unchanged and carry as before. Validation: 29 passed, 0 failed (28 unit and 1 doctest); clippy `-D warnings` clean; one copy each of iroh, iroh-base, iroh-relay, iroh-dns, noq, noq-proto and noq-udp in the lock; `patch.unused` 0; no crates.io iroh or noq.
+
+### iroh 1.4.2003 and noq 1.4.1002 re-pin (2026-11-10)
+
+| Upstream base | Tag | Pinned commit | Branch |
+|---|---|---|---|
+| `v0.7.0` | `aster-iroh-util-v0.7.1001-p1` | `e83da6f8605adf071a6a846a0d804fb418b606a6` | `upgrade/iroh-util-v0.7.0` |
 
 - **`aster-iroh-util-v0.7.1001-p1`** (`f91c1f97`): re-pin only ("build: re-pin noq 1.4.1002 and iroh 1.4.2003"), to iroh `370b54434` (Aster iroh 1.4.2003) and noq `4e193fb2d` (Aster noq 1.4.1002), the "vpn-paths" wave. No code or version change; the crate stays 0.7.1001. Validation: 28 passed.
 
